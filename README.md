@@ -1,72 +1,118 @@
 # zed-base
 
-Opinionated boilerplate for lightweight Node.js TypeScript microservices.
+Opinionated boilerplate for lightweight Node.js TypeScript microservices. Fork this to build your service – it provides reusable components for config, database, routing, logging, and HTTP clients.
 
-## Config Module
+## Getting Started
 
-The config module loads environment variables from `.env` file using `dotenv`.
+1. Copy `.env.example` to `.env` and customize values (e.g. `DB_TYPE`, DB creds, `LOG_LEVEL`).
+2. Run `npm run build` to compile TypeScript.
+3. Run `npm start` to launch the app (uses `src/index.ts` bootstrap).
 
-See `src/config/config.ts` for the `Config` interface and loaded config object.
+Extend by adding your entities, routes, business logic. Use `npm run build` for production builds.
 
-Copy `.env.example` to `.env` and customize.
+## Config
 
-## Setup
+Import the loaded config and helpers:
 
-1. Copy `.env.example` to `.env` and fill in values.
-2. Install missing types: `npm install --save-dev @types/node` (required for process.env in TS; also `@types/better-sqlite3` if needed for DB).
-3. Run `npm run build` to compile.
-4. Note: Other dependencies are already installed: express, morgan, dotenv, typescript, better-sqlite3.
-   For dev mode, you may want to install ts-node: `npm install --save-dev ts-node @types/node` (already noted in types).
-   tsconfig.json updated with TypeORM decorators + strict options.
+```ts
+import { config, isProd } from './config/config';
 
-The config module is in `src/config/config.ts`.
+console.log(config.PORT);  // e.g. 3000
+if (isProd()) {
+  // Prod-only logic (forces Postgres etc.)
+}
+```
 
-## Database Module
+See `src/config/config.ts` for full `Config` interface (NODE_ENV, DB_*, LOG_LEVEL, etc.) and `.env` loading.
 
-Added in `src/database/index.ts`: TypeORM `AppDataSource` setup (uses `better-sqlite3` driver for SQLite to match your installed package).
-- Prod: only Postgres.
-- Dev/Test: supports Postgres, SQLite file (`DB_TYPE=sqlite`), or in-memory (`DB_TYPE=sqlite:memory` for tests).
-- Uses `config.isProd()` and `DB_TYPE` from `.env`.
-- Entities registered explicitly as classes (ensures metadata for tests/scripts); migration/subscriber globs use `__dirname`.
-- Requires: typeorm, pg, better-sqlite3, reflect-metadata (per your deps).
+## Database
 
-**Additional steps you may need:**
-- If SQLite error persists: ensure `better-sqlite3` is in dependencies (you have it); sqlite3 is not required.
-- Install DB packages if not done: `npm install typeorm pg better-sqlite3 reflect-metadata` (and `@types/better-sqlite3` if TS issues for driver).
-- Run `npm run build` then `npm start` to test DB init (should now succeed with better-sqlite3).
+Use TypeORM `AppDataSource` for DB ops (Postgres in prod; SQLite options in dev/test):
 
-## Demo Models & Migration
+```ts
+import { AppDataSource } from './database';
+import { User } from './entities/User';  // Your entities here
 
-Added basic TypeORM entities in `src/entities/` (User, Post, Comment with relations) + sample migration in `src/migrations/InitialMigration.ts` for demo app.
+await AppDataSource.initialize();
 
-## Test Script
+// Example query
+const userRepo = AppDataSource.getRepository(User);
+const users = await userRepo.find({ relations: ['posts'] });
+```
 
-Added `scripts/database/test.ts` to verify inserts/reads across models (uses relations).
+- Add entities to `src/entities/` (decorators).
+- Migrations in `src/migrations/` (extend `InitialMigration` or generate via TypeORM).
+- Config-driven: `DB_TYPE=sqlite` (or `:memory:`) in dev; Postgres always in prod via `config.isProd()`.
 
-**To run test:**
-- Set DB_TYPE=sqlite in .env (for quick demo).
-- Install ts-node if needed: `npm install --save-dev ts-node`
-- Run: `npx ts-node scripts/database/test.ts` (or build + node dist equivalent).
+See `src/database/index.ts`.
 
-## Router Component
+## Router
 
-Added in `src/router/{index,types}.ts`: `createRouter(routes)` per spec.
-- Takes array of `{route_name, method, endpoint, handler}`.
-- Creates Express app, registers routes, wraps handlers to enrich `req.routeName` (for logging; extensible for auth).
-- Demo routes in `src/index.ts`; run app to test `/health` and `/api/demo`.
+Define routes and create Express app:
 
-**Additional steps:**
-- For full Express features (e.g. cors, rate-limit): `npm install express cors` etc. (base already present).
-- Test: `npm run build && npm start` (hits port from config).
+```ts
+import { createRouter, type Route } from './router';
 
-## Logger Component
+const routes: Route[] = [
+  {
+    route_name: 'health_check',
+    method: 'GET',
+    endpoint: '/health',
+    handler: (req, res) => {
+      res.json({ status: 'ok' });
+    },
+  },
+  // Add your routes...
+];
 
-Added in `src/logger/index.ts`: Winston-based structured JSON logger (levels from config.LOG_LEVEL).
-- API: `logger.info(req, msg, meta?)` (adds requestId/routeName ONLY for request logs; omits for bootstrap/non-request).
-- Request ID: from `X-Request-ID` header or auto-UUID (set in router wrapper FIRST).
-- Router wrapper now logs "Request started" + "Request ended (status, duration)" per request.
-- Integrated in routes/bootstrap for demo; supports cross-service tracing.
+const app = createRouter(routes);
+// app is standard Express instance; add middleware as needed
+```
 
-**Additional steps:**
-- Winston already in deps; for UUID no extra lib (uses Node crypto).
-- Test logs: `npm run build && npm start` then curl /health (check JSON logs with requestId).
+- Handlers receive enriched `req` (with `routeName`, `requestId`).
+- Extend wrapper in `src/router/index.ts` for auth etc.
+- See `src/router/types.ts` for `Route` interface.
+
+## Logger
+
+Structured JSON logging (Winston, levels from `config.LOG_LEVEL`):
+
+```ts
+import { logger } from './logger';
+
+// In request handlers (req provides requestId/routeName):
+logger.info(req, 'Operation completed', { userId: 123 });
+logger.error(req, 'Failed to process', { error: err.message });
+
+// Non-request (e.g. startup):
+logger.info({} as any, 'App started');
+```
+
+- Auto-traces via `requestId` (propagated from `X-Request-ID` header or UUID).
+- Request wrapper auto-logs start/end (status, duration).
+- See `src/logger/index.ts`.
+
+## HttpClient
+
+For outbound calls to other services:
+
+```ts
+import { HttpClient } from './httpclient';
+
+const client = new HttpClient({
+  baseUrl: 'https://other-service.example.com',
+  timeout: 5000,
+  retryCount: 2,
+  propagateHeaders: ['x-request-id', 'authorization'],  // From current req
+  headers: { 'X-API-Key': 'secret' },  // Common
+});
+
+// In handler:
+const data = await client.get(req, '/api/users', { 'Custom-Header': 'value' });
+await client.post(req, '/api/posts', { title: 'New' });
+```
+
+- Logs outbound requests/responses/errors (with latency, status).
+- Retries timeouts; throws on 4xx; per-request options supported.
+- See `src/httpclient/{index,types}.ts` for full API.
+
