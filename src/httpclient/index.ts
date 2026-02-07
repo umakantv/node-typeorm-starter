@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosResponse, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosResponse, AxiosError, AxiosRequestConfig } from 'axios';
 import { HttpClientOptions, RequestOptions } from './types';
 import { logger } from '../logger';
 
