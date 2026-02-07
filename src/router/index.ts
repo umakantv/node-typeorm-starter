@@ -41,11 +41,15 @@ export const createRouter = (routes: Route[]): Express => {
   // Basic middleware (extend with body-parser, etc. later)
   app.use(express.json());
 
-  // Register each route with wrapper
+  // Debug: log all routes being registered (to diagnose 404s)
+  console.log('DEBUG: Creating router with routes count:', routes.length);
   routes.forEach((route) => {
-    const method = route.method.toLowerCase() as keyof Express;
-    (app[method] as any)(route.endpoint, wrapHandler(route));
+    console.log(`DEBUG: Registering ${route.method} ${route.endpoint} (handler: ${typeof route.handler})`);
+    // Use dynamic access for robustness (supports PATCH etc. across Express versions)
+    const methodName = route.method.toLowerCase();
+    (app as any)[methodName](route.endpoint, wrapHandler(route));
   });
+  console.log('DEBUG: All routes registered; server ready for requests.');
 
   return app;
 };

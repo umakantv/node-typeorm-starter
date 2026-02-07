@@ -2,12 +2,9 @@ import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { config, isProd } from '../config/config';
 
-// Import entities explicitly to ensure metadata is registered (fixes runtime issues like in test scripts)
-import { User } from '../entities/User';
-import { Post } from '../entities/Post';
-import { Comment } from '../entities/Comment';
+// Import entities explicitly (for metadata registration)
+import { RegisteredWebhook } from '../entities/RegisteredWebhook';
 
-// Determine DB_TYPE: in prod always 'postgres'; else from config
 const getDbType = (): 'postgres' | 'sqlite' | 'sqlite:memory' => {
   if (isProd()) {
     return 'postgres';
@@ -17,23 +14,20 @@ const getDbType = (): 'postgres' | 'sqlite' | 'sqlite:memory' => {
 
 const dbType = getDbType();
 
-let dataSourceOptions: any; // TypeORM options
+let dataSourceOptions: any;
 
 if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
-  // SQLite (using better-sqlite3 driver) for dev/test; supports :memory:
   const isMemory = dbType === 'sqlite:memory';
   dataSourceOptions = {
     type: 'better-sqlite3' as const,
-    database: isMemory ? ':memory:' : (config.DB_DATABASE || './data.sqlite'),
-    synchronize: true, // Auto-create tables (dev only; disable in prod)
+    database: isMemory ? ':memory:' : (config.DB_DATABASE || './webhooks.sqlite'),
+    synchronize: true,
     logging: config.LOG_LEVEL === 'debug',
-    // Entities as classes (ensures metadata); globs for migrations/subscribers only
-    entities: [User, Post, Comment],
+    entities: [RegisteredWebhook],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };
 } else {
-  // Postgres (default for prod or explicit)
   dataSourceOptions = {
     type: 'postgres' as const,
     host: config.DB_HOST,
@@ -41,10 +35,9 @@ if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
     username: config.DB_USER,
     password: config.DB_PASSWORD,
     database: config.DB_DATABASE,
-    synchronize: !isProd(), // Only sync in non-prod
+    synchronize: !isProd(),
     logging: config.LOG_LEVEL === 'debug',
-    // Entities as classes (ensures metadata); globs for migrations/subscribers only
-    entities: [User, Post, Comment],
+    entities: [RegisteredWebhook],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };

@@ -25,7 +25,7 @@ export const config: Config = {
   DB_DATABASE: process.env.DB_DATABASE || '',
   DB_PASSWORD: process.env.DB_PASSWORD || '',
   LOG_LEVEL: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
-  DB_TYPE: ((process.env.DB_TYPE as any) || 'postgres') as 'postgres' | 'sqlite' | 'sqlite:memory',
+  DB_TYPE: ((process.env.DB_TYPE as any) || 'sqlite') as 'postgres' | 'sqlite' | 'sqlite:memory',
 };
 
 // In production, only postgres is allowed (per requirements). DB_TYPE from .env is ignored.
