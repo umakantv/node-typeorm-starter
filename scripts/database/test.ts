@@ -40,6 +40,7 @@ async function testDatabase() {
       resourceId: '123',
       resourceType: 'post',
       content: { message: 'test event' },
+      headers: null,
       triggeredAt: new Date(),
       triggeredBy: 'service',
       completedAt: null,

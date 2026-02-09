@@ -14,6 +14,9 @@ export class WebhookRun {
   @Column({ type: 'json' })
   content: Record<string, any>;
 
+  @Column({ type: 'json', nullable: true })
+  headers: Record<string, any> | null;
+
   @Column({ type: 'datetime' })
   triggeredAt: Date;
 

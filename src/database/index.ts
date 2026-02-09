@@ -6,6 +6,7 @@ import { config, isProd } from '../config/config';
 import { RegisteredWebhook } from '../entities/RegisteredWebhook';
 import { WebhookRun } from '../entities/WebhookRun';
 import { WebhookExecution } from '../entities/WebhookExecution';
+import { Schedule } from '../entities/Schedule';
 
 const getDbType = (): 'postgres' | 'sqlite' | 'sqlite:memory' => {
   if (isProd()) {
@@ -25,7 +26,7 @@ if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
     database: isMemory ? ':memory:' : (config.DB_DATABASE || './webhooks.sqlite'),
     synchronize: true,
     logging: config.LOG_LEVEL === 'debug',
-    entities: [RegisteredWebhook, WebhookRun, WebhookExecution],
+    entities: [RegisteredWebhook, WebhookRun, WebhookExecution, Schedule],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };
@@ -39,7 +40,7 @@ if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
     database: config.DB_DATABASE,
     synchronize: !isProd(),
     logging: config.LOG_LEVEL === 'debug',
-    entities: [RegisteredWebhook, WebhookRun, WebhookExecution],
+    entities: [RegisteredWebhook, WebhookRun, WebhookExecution, Schedule],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };

@@ -3,9 +3,11 @@ import { AppDataSource } from '../database';
 import { RegisteredWebhook } from '../entities/RegisteredWebhook';
 import { WebhookRun } from '../entities/WebhookRun';
 import { WebhookExecution } from '../entities/WebhookExecution';
+import { Schedule } from '../entities/Schedule';
 import { logger } from '../logger';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
+import { CronExpressionParser } from 'cron-parser';
 
 // Schemas (moved from index; search now includes optional id)
 const registerSchema = z.object({
@@ -73,10 +75,50 @@ const triggerSchema = z.object({
   resourceType: z.string().min(1),
   resourceId: z.string().min(1),
   content: z.record(z.string(), z.any()),
+  headers: z.record(z.string(), z.any()).nullable().optional().default(null),
   triggeredBy: z.string().min(1),
 }).strict();
 
-// Handlers (moved; trigger uses parallel axios calls to matching enabled webhooks)
+// Schedule schemas (create requires webhook + cron freq + content; update is partial; freq must be 5-part cron, min granularity)
+const createScheduleSchema = z.object({
+  webhookId: z.string().uuid(),
+  frequency: z.string().min(1),
+  content: z.record(z.string(), z.any()),
+  enabled: z.boolean().optional().default(true),
+  endAt: z.string().datetime().optional().nullable().transform((val) => val ? new Date(val) : null),
+  triggeredBy: z.string().min(1).optional().nullable().default(null),
+}).strict();
+
+const updateScheduleSchema = z.object({
+  frequency: z.string().min(1).optional(),
+  content: z.record(z.string(), z.any()).optional(),
+  enabled: z.boolean().optional(),
+  endAt: z.string().datetime().optional().nullable().transform((val) => val ? new Date(val) : null),
+  triggeredBy: z.string().min(1).optional().nullable(),
+}).strict();
+
+// Reusable type for trigger options (groups params for readability; used by API + scheduler)
+interface TriggerOptions {
+  resourceType: string;
+  resourceId: string;
+  content: Record<string, any>;
+  headers?: Record<string, any> | null;
+  triggeredBy: string;
+  reqForLogging?: any;
+  targetWebhookIds?: string[];
+}
+
+// Cron next-run (uses cron-parser lib for full support: lists/ranges/etc.; 5 fields; min granularity)
+function calculateNextRunAt(frequency: string, fromDate: Date = new Date()): Date {
+  try {
+    const interval = CronExpressionParser.parse(frequency, { currentDate: fromDate });
+    return interval.next().toDate();
+  } catch (err) {
+    throw new Error(`Invalid cron frequency: ${ (err as Error).message }`);
+  }
+}
+
+// Handlers (incl. schedules + internal trigger; cron basic parser; timer in startScheduleTimer)
 export const registerWebhookHandler = async (req: any, res: any) => {
   try {
     const data = registerSchema.parse(req.body);
@@ -230,105 +272,237 @@ export const patchWebhookHandler = async (req: any, res: any) => {
   }
 };
 
+
+// Internal reusable trigger core (used by API handler + scheduler; does run/exec tracking; assumes valid inputs; no res)
+// If targetWebhookIds provided, triggers only those (for schedules); else all enabled for resource
+export const doTriggerWebhooks = async (options: TriggerOptions) => {
+  const { resourceType, resourceId, content, headers = null, triggeredBy, reqForLogging, targetWebhookIds } = options;
+  const webhookRepo = AppDataSource.getRepository(RegisteredWebhook);
+  const runRepo = AppDataSource.getRepository(WebhookRun);
+  const execRepo = AppDataSource.getRepository(WebhookExecution);
+
+  // Find matching enabled webhooks for resource (filter to target IDs if provided for schedules)
+  const where: any = { resourceType, resourceId, enabled: true };
+  if (targetWebhookIds && targetWebhookIds.length > 0) {
+    where.id = targetWebhookIds;  // TypeORM In() via array
+  }
+  const webhooks = await webhookRepo.find({ where });
+
+  const runId = randomUUID();
+  const now = new Date();
+  const run = runRepo.create({
+    id: runId,
+    resourceId,
+    resourceType,
+    content,
+    headers,
+    triggeredAt: now,
+    triggeredBy,
+    completedAt: null,
+  });
+  await runRepo.save(run);
+
+  if (webhooks.length === 0) {
+    await runRepo.update({ id: runId }, { completedAt: new Date() });
+    logger.info(reqForLogging || {}, 'No enabled webhooks found for trigger', { resourceType, resourceId });
+    return { success: 0, failure: 0, runId };
+  }
+
+  // Parallel triggers + capture details for bulk exec save (optimal write; always save all attempts)
+  const execPromises = webhooks.map(async (webhook) => {
+    const start = new Date();
+    let result: 'success' | 'failure' = 'failure';
+    let statusCode: number | null = null;
+    let responseText: string | null = null;
+    try {
+      const axiosResp = await axios.post(webhook.webhookUrl, content, {
+        headers: { ...(webhook.headers || {}), ...(headers || {}) },
+        timeout: webhook.requestTimeout * 1000,
+        responseType: 'text',
+      });
+      result = 'success';
+      statusCode = axiosResp.status;
+      responseText = String(axiosResp.data || '');
+    } catch (err: any) {
+      if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        statusCode = 408;
+      } else {
+        statusCode = err.response?.status || null;
+      }
+      responseText = err.response?.data ? String(err.response.data) : null;
+    }
+    const end = new Date();
+    return execRepo.create({
+      webhookRunId: runId,
+      webhookId: webhook.id,
+      ownerType: webhook.ownerType,
+      ownerId: webhook.ownerId,
+      webhookType: webhook.webhookType,
+      webhookUrl: webhook.webhookUrl,
+      headers: { ...(webhook.headers || {}), ...(headers || {}) },
+      result,
+      statusCode,
+      response: responseText,
+      startedAt: start,
+      endedAt: end,
+    });
+  });
+  const executions = await Promise.all(execPromises);
+  await execRepo.save(executions);
+
+  // Update run completion
+  const completedAt = new Date();
+  await runRepo.update({ id: runId }, { completedAt });
+
+  // Counts from execs
+  const successCount = executions.filter(e => e.result === 'success').length;
+  const failureCount = executions.length - successCount;
+  logger.info(reqForLogging || {}, 'Webhook trigger completed', {
+    resourceType,
+    resourceId,
+    total: executions.length,
+    successCount,
+    failureCount,
+    runId,
+  });
+  return { success: successCount, failure: failureCount, runId };
+};
+
+// Refactored API handler (uses internal doTrigger)
 export const triggerWebhookHandler = async (req: any, res: any) => {
   try {
     const data = triggerSchema.parse(req.body);
-    const webhookRepo = AppDataSource.getRepository(RegisteredWebhook);
-    const runRepo = AppDataSource.getRepository(WebhookRun);
-    const execRepo = AppDataSource.getRepository(WebhookExecution);
-
-    // Find matching enabled webhooks for resource
-    const webhooks = await webhookRepo.find({
-      where: {
-        resourceType: data.resourceType,
-        resourceId: data.resourceId,
-        enabled: true,
-      },
-    });
-
-    const runId = randomUUID();
-    const now = new Date();
-    const run = runRepo.create({
-      id: runId,
-      resourceId: data.resourceId,
+    // Call with options object (for readability)
+    const result = await doTriggerWebhooks({
       resourceType: data.resourceType,
+      resourceId: data.resourceId,
       content: data.content,
-      triggeredAt: now,
+      headers: data.headers,
       triggeredBy: data.triggeredBy,
-      completedAt: null,
+      reqForLogging: req,
     });
-    await runRepo.save(run);
-
-    if (webhooks.length === 0) {
-      await runRepo.update({ id: runId }, { completedAt: new Date() });
-      logger.info(req, 'No enabled webhooks found for trigger', { resourceType: data.resourceType, resourceId: data.resourceId });
-      return res.json({ message: 'No webhooks triggered', success: 0, failure: 0 });
-    }
-
-    // Parallel triggers + capture details for bulk exec save (optimal write; always save all attempts)
-    const execPromises = webhooks.map(async (webhook) => {
-      const start = new Date();
-      let result: 'success' | 'failure' = 'failure';
-      let statusCode: number | null = null;
-      let responseText: string | null = null;
-      let axiosError: any = null;
-      try {
-        const axiosResp = await axios.post(webhook.webhookUrl, data.content, {
-          headers: webhook.headers || {},
-          timeout: webhook.requestTimeout * 1000,
-          responseType: 'text',  // for raw response text
-        });
-        result = 'success';
-        statusCode = axiosResp.status;
-        responseText = String(axiosResp.data || '');
-      } catch (err: any) {
-        axiosError = err;
-        if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
-          statusCode = 408;
-        } else {
-          statusCode = err.response?.status || null;
-        }
-        responseText = err.response?.data ? String(err.response.data) : null;
-      }
-      const end = new Date();
-      return execRepo.create({
-        webhookRunId: runId,
-        webhookId: webhook.id,
-        ownerType: webhook.ownerType,
-        ownerId: webhook.ownerId,
-        webhookType: webhook.webhookType,
-        webhookUrl: webhook.webhookUrl,
-        headers: webhook.headers,
-        result,
-        statusCode,
-        response: responseText,
-        startedAt: start,
-        endedAt: end,
-      });
-    });
-    const executions = await Promise.all(execPromises);
-    await execRepo.save(executions);  // bulk insert
-
-    // Update run completion
-    const completedAt = new Date();
-    await runRepo.update({ id: runId }, { completedAt });
-
-    // Counts from execs
-    const successCount = executions.filter(e => e.result === 'success').length;
-    const failureCount = executions.length - successCount;
-    logger.info(req, 'Webhook trigger completed', {
-      resourceType: data.resourceType,
-      resourceId: data.resourceId,
-      total: executions.length,
-      successCount,
-      failureCount,
-      runId,
-    });
-    return res.json({ message: 'Trigger completed', success: successCount, failure: failureCount });
+    return res.json({ message: 'Trigger completed', success: result.success, failure: result.failure });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation failed', details: error.issues });
     }
     return res.status(400).json({ error: (error as Error).message });
   }
+};
+
+// Schedule handlers
+export const createScheduleHandler = async (req: any, res: any) => {
+  try {
+    const data = createScheduleSchema.parse(req.body);
+    const scheduleRepo = AppDataSource.getRepository(Schedule);
+    const webhookRepo = AppDataSource.getRepository(RegisteredWebhook);
+
+    // Verify webhook exists
+    const webhook = await webhookRepo.findOne({ where: { id: data.webhookId } });
+    if (!webhook) {
+      return res.status(404).json({ error: 'Webhook not found' });
+    }
+
+    // Compute nextRunAt (from now)
+    const nextRunAt = calculateNextRunAt(data.frequency);
+
+    const schedule = scheduleRepo.create({
+      id: randomUUID(),
+      webhookId: data.webhookId,
+      frequency: data.frequency,
+      content: data.content,
+      enabled: data.enabled,
+      endAt: data.endAt,
+      triggeredBy: data.triggeredBy,
+      nextRunAt,
+      lastRunAt: null,
+    });
+    const saved = await scheduleRepo.save(schedule);
+    return res.status(201).json(saved);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Validation failed', details: error.issues });
+    }
+    return res.status(400).json({ error: (error as Error).message });
+  }
+};
+
+export const updateScheduleHandler = async (req: any, res: any) => {
+  try {
+    const id = req.params?.id;
+    if (!id) {
+      return res.status(400).json({ error: 'Schedule ID is required' });
+    }
+    const updates = updateScheduleSchema.parse(req.body);
+    const scheduleRepo = AppDataSource.getRepository(Schedule);
+    const existing = await scheduleRepo.findOne({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+
+    // Apply updates
+    Object.assign(existing, updates);
+    // Recompute nextRunAt if frequency changed (or always refresh)
+    if (updates.frequency !== undefined) {
+      existing.nextRunAt = calculateNextRunAt(updates.frequency);
+    } else {
+      existing.nextRunAt = calculateNextRunAt(existing.frequency, new Date());
+    }
+    const saved = await scheduleRepo.save(existing);
+    return res.json(saved);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Validation failed', details: error.issues });
+    }
+    return res.status(400).json({ error: (error as Error).message });
+  }
+};
+
+// Background scheduler: runs every 60s, checks due schedules, triggers via doTriggerWebhooks, updates next/lastRunAt
+// (single instance; no extra deps; called from index.ts bootstrap)
+export const startScheduleTimer = () => {
+  logger.info({}, 'Starting schedule timer (checks every 60s)');
+  setInterval(async () => {
+    try {
+      const scheduleRepo = AppDataSource.getRepository(Schedule);
+      const now = new Date();
+      // Find enabled schedules due now (nextRunAt <= now), not ended
+      const dueSchedules = await scheduleRepo.find({
+        where: {
+          enabled: true,
+        },
+      });
+      // Parallel triggers/updates (non-blocking; preserves cron timing across schedules)
+      const triggerPromises = dueSchedules.map(async (sched) => {
+        if (sched.nextRunAt > now || (sched.endAt && sched.endAt <= now)) {
+          return;
+        }
+        // Get webhook for resource details
+        const webhookRepo = AppDataSource.getRepository(RegisteredWebhook);
+        const webhook = await webhookRepo.findOne({ where: { id: sched.webhookId } });
+        if (!webhook || !webhook.enabled) {
+          return;  // skip if webhook gone/disabled
+        }
+        // Determine triggeredBy
+        const triggeredBy = sched.triggeredBy || `schedule_${sched.id}`;
+        // Trigger internally (use schedule content/headers=null; target *only* this webhookId)
+        await doTriggerWebhooks({
+          resourceType: webhook.resourceType,
+          resourceId: webhook.resourceId,
+          content: sched.content,
+          headers: null,  // no override headers for schedules
+          triggeredBy,
+          // no reqForLogging (background)
+          targetWebhookIds: [sched.webhookId],  // specific webhook only (per schedule)
+        });
+        // Update schedule: last=now, next=calc from now
+        sched.lastRunAt = now;
+        sched.nextRunAt = calculateNextRunAt(sched.frequency, now);
+        await scheduleRepo.save(sched);
+      });
+      await Promise.all(triggerPromises);
+    } catch (err) {
+      logger.error({}, 'Schedule timer error', { error: (err as Error).message });
+    }
+  }, 60000);  // every minute
 };

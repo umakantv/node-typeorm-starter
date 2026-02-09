@@ -10,6 +10,9 @@ import {
   searchWebhookExecutionsHandler,
   patchWebhookHandler,
   triggerWebhookHandler,
+  createScheduleHandler,
+  updateScheduleHandler,
+  startScheduleTimer,
 } from './controllers/webhooks';
 
 // Sample route handlers (demo; use entities in real; logger uses req.requestId)
@@ -89,6 +92,18 @@ const routes: Route[] = [
     handler: triggerWebhookHandler,
   },
   {
+    route_name: 'create_schedule',
+    method: 'POST',
+    endpoint: '/api/webhooks/schedules',
+    handler: createScheduleHandler,
+  },
+  {
+    route_name: 'update_schedule',
+    method: 'PATCH',
+    endpoint: '/api/webhooks/schedules/:id',
+    handler: updateScheduleHandler,
+  },
+  {
     route_name: 'test_webhook_success',
     method: 'POST',
     endpoint: '/api/webhooks/test_success',
@@ -125,6 +140,9 @@ async function bootstrap() {
     logger.error({} as any, 'DB init error', { error });
     process.exit(1);
   }
+
+  // Start schedule timer (after DB ready; runs every min to check due schedules)
+  startScheduleTimer();
 
   // Create router with routes
   const app = createRouter(routes);
