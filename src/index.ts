@@ -6,6 +6,8 @@ import { logger } from './logger';
 import {
   registerWebhookHandler,
   searchWebhooksHandler,
+  searchWebhookRunsHandler,
+  searchWebhookExecutionsHandler,
   patchWebhookHandler,
   triggerWebhookHandler,
 } from './controllers/webhooks';
@@ -21,7 +23,7 @@ const demoHandler = async (req: any, res: any) => {
   res.json({ message: 'Demo route with enriched req.routeName and requestId', routeName: req.routeName, requestId: req.requestId });
 };
 
-// Test handlers for webhook trigger (success=200 immediate, failure=400, timeout=200 after 80s delay)
+// Test handlers for webhook trigger (success=200 immediate, failure=400, timeout=200 after 15s delay)
 const testSuccessHandler = (req: any, res: any) => {
   res.status(200).json({ status: 'success', message: 'Webhook received successfully' });
 };
@@ -31,8 +33,8 @@ const testFailureHandler = (req: any, res: any) => {
 };
 
 const testTimeoutHandler = async (req: any, res: any) => {
-  // Simulate long delay to test requestTimeout
-  await new Promise((resolve) => setTimeout(resolve, 80000));
+  // Simulate delay to test requestTimeout
+  await new Promise((resolve) => setTimeout(resolve, 15000));
   res.status(200).json({ status: 'success', message: 'Webhook received after delay' });
 };
 
@@ -61,6 +63,18 @@ const routes: Route[] = [
     method: 'POST',
     endpoint: '/api/webhooks/search',
     handler: searchWebhooksHandler,
+  },
+  {
+    route_name: 'search_webhook_runs',
+    method: 'POST',
+    endpoint: '/api/webhooks/runs',
+    handler: searchWebhookRunsHandler,
+  },
+  {
+    route_name: 'search_webhook_executions',
+    method: 'POST',
+    endpoint: '/api/webhooks/executions',
+    handler: searchWebhookExecutionsHandler,
   },
   {
     route_name: 'patch_webhook',

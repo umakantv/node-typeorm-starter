@@ -1,118 +1,44 @@
-# zed-base
+# Webhooks Microservice
 
-Opinionated boilerplate for lightweight Node.js TypeScript microservices. Fork this to build your service – it provides reusable components for config, database, routing, logging, and HTTP clients.
+This microservice implements a pub-sub model for webhooks: services register (subscribe) to resources/events, and triggers publish to matching webhook endpoints. Supports registration, search/patch, triggers with tracking (runs + per-execution details), and reporting APIs. Built with TypeORM (Postgres prod / SQLite dev), Express, structured logging, and retrying HTTP client.
 
-## Getting Started
+## Features
+- **Register webhooks**: Subscribe to resourceType/resourceId with owner, URL, timeouts, headers.
+- **Trigger webhooks**: Fire to enabled matching subscriptions; tracks runs/executions (success/fail, status, response, timings).
+- **Reporting**: Paginated searches for webhooks, runs (with success/failure counts), executions.
+- **Config-driven**: Env-based (DB, logs); prod forces Postgres.
+- **Tracing/Logging**: Auto requestId propagation + JSON logs.
+- **DB**: Entities + manual migrations; synchronize in dev.
 
-1. Copy `.env.example` to `.env` and customize values (e.g. `DB_TYPE`, DB creds, `LOG_LEVEL`).
-2. Run `npm run build` to compile TypeScript.
-3. Run `npm start` to launch the app (uses `src/index.ts` bootstrap).
+## Setup
+1. Copy `.env.example` to `.env` (set DB creds, `DB_TYPE=sqlite` for dev, `LOG_LEVEL=info`).
+2. `npm run build` (TS compile).
+3. `npm start` (starts on PORT=3000; inits DB/migrations).
 
-Extend by adding your entities, routes, business logic. Use `npm run build` for production builds.
+See `src/config/config.ts`, `src/database/index.ts`.
 
-## Config
+## APIs (all JSON; enriched req with requestId/routeName)
+- **POST /api/webhooks/register**: Register webhook (required: resourceType, resourceId, owner*, webhookUrl, etc).
+- **POST /api/webhooks/search**: Paginated search webhooks (filters: id, resource*, owner*, enabled; pagination: limit, offset, orderBy, orderByDir).
+- **PATCH /api/webhooks/:id**: Update webhook.
+- **POST /api/webhooks/trigger**: Trigger for resource (content + triggeredBy); auto-tracks run/execs (408 for timeouts).
+- **POST /api/webhooks/runs**: Paginated runs search (filters: resourceType/resourceId; + counts/orderBy).
+- **POST /api/webhooks/executions**: Paginated executions search (filters: webhookRunId, result, statusCode, etc).
+- **GET /health**, **/api/demo** (tests), test endpoints.
 
-Import the loaded config and helpers:
+See `src/controllers/webhooks.ts`, `src/index.ts` (routes), `src/router/`.
 
-```ts
-import { config, isProd } from './config/config';
+## Entities (src/entities/)
+- **RegisteredWebhook**: Subscription details (id, resource*, owner*, url, headers, timeouts, enabled).
+- **WebhookRun**: Trigger batch (id, resource*, content, triggeredAt/By, completedAt).
+- **WebhookExecution**: Per-webhook outcome (id, runId/webhookId, result, statusCode, response, timings).
 
-console.log(config.PORT);  // e.g. 3000
-if (isProd()) {
-  // Prod-only logic (forces Postgres etc.)
-}
-```
+Migrations in `src/migrations/` (run via TypeORM).
 
-See `src/config/config.ts` for full `Config` interface (NODE_ENV, DB_*, LOG_LEVEL, etc.) and `.env` loading.
+## Other Components
+- **Logger**: `src/logger/` (Winston; auto-traces).
+- **HttpClient**: `src/httpclient/` (retries, logging, header prop).
+- **DB**: TypeORM; see `scripts/database/test.ts` for examples.
 
-## Database
-
-Use TypeORM `AppDataSource` for DB ops (Postgres in prod; SQLite options in dev/test):
-
-```ts
-import { AppDataSource } from './database';
-import { User } from './entities/User';  // Your entities here
-
-await AppDataSource.initialize();
-
-// Example query
-const userRepo = AppDataSource.getRepository(User);
-const users = await userRepo.find({ relations: ['posts'] });
-```
-
-- Add entities to `src/entities/` (decorators).
-- Migrations in `src/migrations/` (extend `InitialMigration` or generate via TypeORM).
-- Config-driven: `DB_TYPE=sqlite` (or `:memory:`) in dev; Postgres always in prod via `config.isProd()`.
-
-See `src/database/index.ts`.
-
-## Router
-
-Define routes and create Express app:
-
-```ts
-import { createRouter, type Route } from './router';
-
-const routes: Route[] = [
-  {
-    route_name: 'health_check',
-    method: 'GET',
-    endpoint: '/health',
-    handler: (req, res) => {
-      res.json({ status: 'ok' });
-    },
-  },
-  // Add your routes...
-];
-
-const app = createRouter(routes);
-// app is standard Express instance; add middleware as needed
-```
-
-- Handlers receive enriched `req` (with `routeName`, `requestId`).
-- Extend wrapper in `src/router/index.ts` for auth etc.
-- See `src/router/types.ts` for `Route` interface.
-
-## Logger
-
-Structured JSON logging (Winston, levels from `config.LOG_LEVEL`):
-
-```ts
-import { logger } from './logger';
-
-// In request handlers (req provides requestId/routeName):
-logger.info(req, 'Operation completed', { userId: 123 });
-logger.error(req, 'Failed to process', { error: err.message });
-
-// Non-request (e.g. startup):
-logger.info({} as any, 'App started');
-```
-
-- Auto-traces via `requestId` (propagated from `X-Request-ID` header or UUID).
-- Request wrapper auto-logs start/end (status, duration).
-- See `src/logger/index.ts`.
-
-## HttpClient
-
-For outbound calls to other services:
-
-```ts
-import { HttpClient } from './httpclient';
-
-const client = new HttpClient({
-  baseUrl: 'https://other-service.example.com',
-  timeout: 5000,
-  retryCount: 2,
-  propagateHeaders: ['x-request-id', 'authorization'],  // From current req
-  headers: { 'X-API-Key': 'secret' },  // Common
-});
-
-// In handler:
-const data = await client.get(req, '/api/users', { 'Custom-Header': 'value' });
-await client.post(req, '/api/posts', { title: 'New' });
-```
-
-- Logs outbound requests/responses/errors (with latency, status).
-- Retries timeouts; throws on 4xx; per-request options supported.
-- See `src/httpclient/{index,types}.ts` for full API.
+Prod: Postgres only; graceful shutdown. Extend for auth, more triggers.
 

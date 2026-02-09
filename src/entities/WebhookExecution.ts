@@ -1,15 +1,15 @@
 import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
 
 @Entity()
-export class RegisteredWebhook {
+export class WebhookExecution {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column()
-  resourceType: string;
+  webhookRunId: string;
 
   @Column()
-  resourceId: string;
+  webhookId: string;
 
   @Column()
   ownerType: string;
@@ -26,12 +26,18 @@ export class RegisteredWebhook {
   @Column({ type: 'json', nullable: true })
   headers: Record<string, any> | null;
 
-  @Column({ type: 'int' })
-  connectionTimeout: number;
+  @Column()
+  result: 'success' | 'failure';
 
-  @Column({ type: 'int' })
-  requestTimeout: number;
+  @Column({ type: 'int', nullable: true })
+  statusCode: number | null;
 
-  @Column({ default: true })
-  enabled: boolean;
+  @Column({ type: 'text', nullable: true })
+  response: string | null;
+
+  @Column({ type: 'datetime' })
+  startedAt: Date;
+
+  @Column({ type: 'datetime' })
+  endedAt: Date;
 }
