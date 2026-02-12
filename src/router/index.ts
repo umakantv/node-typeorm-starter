@@ -3,9 +3,20 @@ import type { Route } from './types';
 import { randomUUID } from 'crypto';
 import { logger } from '../logger';
 
-// Wrap handler: FIRST set requestId (from header or generate UUID) for tracing across services/logs.
-// Then enrich with routeName. Extend here for auth etc.
-// Logs "Request started" + "Request ended..." (with timing/status) for every request.
+// Separate auth middleware (separation of concerns; enforces headers, enriches req, or 401)
+const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const clientType = req.headers['x-account-type'] as string;
+  const clientId = req.headers['x-account-id'] as string;
+  if (!clientType || clientType !== 'service' || !clientId) {
+    res.status(401).json({ error: 'Unauthorized Access' });
+    return;
+  }
+  (req as any).clientType = clientType;
+  (req as any).clientId = clientId;
+  next();
+};
+
+// Wrap handler: uses separate authMiddleware to wrap route.handler (ensures timing logs for 401s)
 const wrapHandler = (route: Route) => {
   return (req: Request, res: Response, next: NextFunction) => {
     // Request ID as first step (before any processing)
@@ -14,12 +25,10 @@ const wrapHandler = (route: Route) => {
       (req as any).requestId = requestId;
       res.setHeader('X-Request-ID', requestId);  // Propagate to response
     }
-    (req as any).routeName = route.route_name;  // For logging
 
+    // Early timing + finish listener (ensures end log even on auth fail/401)
     const startTime = Date.now();
-    logger.info(req, 'Request started');  // Start log with requestId/routeName
-
-    // Log end after response (handles async handlers)
+    // Log end after response (handles async handlers + early auth fails)
     res.on('finish', () => {
       const duration = Date.now() - startTime;
       logger.info(req, 'Request ended', {
@@ -28,7 +37,12 @@ const wrapHandler = (route: Route) => {
       });
     });
 
-    return route.handler(req, res, next);
+    (req as any).routeName = route.route_name;  // For logging
+
+    logger.info(req, 'Request started');  // Start log (before auth; 401s get started + ended)
+
+    // Wrap original handler with auth (separation)
+    return authMiddleware(req, res, () => route.handler(req, res, next));
   };
 };
 

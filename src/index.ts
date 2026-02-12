@@ -9,6 +9,8 @@ import {
   createWorkflowHandler,
   updateWorkflowHandler,
   createApprovalTaskHandler,
+  listApprovalTasksHandler,
+  getApprovalTaskHandler,
 } from './controllers/workflows';
 
 // Sample route handlers (demo; use entities in real; logger uses req.requestId)
@@ -61,6 +63,18 @@ const routes: Route[] = [
     method: 'POST',
     endpoint: '/approval-tasks',
     handler: createApprovalTaskHandler,
+  },
+  {
+    route_name: 'list_approval_tasks',
+    method: 'GET',
+    endpoint: '/approval-tasks',
+    handler: listApprovalTasksHandler,
+  },
+  {
+    route_name: 'get_approval_task',
+    method: 'GET',
+    endpoint: '/approval-tasks/:id',
+    handler: getApprovalTaskHandler,
   },
 ];
 

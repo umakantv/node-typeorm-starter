@@ -1,4 +1,5 @@
-import { Entity, PrimaryColumn, Column, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryColumn, Column, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Workflow } from './Workflow';
 
 export enum ApprovalStatus {
   Pending = 'Pending',
@@ -29,4 +30,8 @@ export class ApprovalTask {
 
   @CreateDateColumn()
   createdAt: Date;
+
+  @ManyToOne(() => Workflow, { nullable: false })
+  @JoinColumn({ name: 'workflowId' })
+  workflow: Workflow;
 }

@@ -18,8 +18,6 @@ const approvalSchema = z.object({
 const createWorkflowSchema = z.object({
   name: z.string().min(1),
   resourceType: z.string().min(1),
-  ownerType: z.string().min(1),
-  ownerId: z.string().min(1),
   enabled: z.boolean().default(true),
   approvals: z.array(approvalSchema).min(1).refine(
     (approvals) => {
@@ -37,21 +35,61 @@ const updateWorkflowSchema = z.object({
   enabled: z.boolean().optional(),
 }).refine(data => Object.keys(data).length > 0, { message: 'At least one field (name or enabled) must be provided' });
 
+// Query validation schemas for list/search APIs (allowed fields only; numbers coerced for pagination)
+const listWorkflowsQuerySchema = z.object({
+  search: z.string().optional(),
+  resourceType: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).optional(),
+}).strict();  // Reject unknown fields (owner* enforced from auth context)
+
+const listApprovalTasksQuerySchema = z.object({
+  search: z.string().optional(),
+  status: z.nativeEnum(ApprovalStatus).optional(),
+  workflowId: z.string().optional(),
+  resourceId: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).optional(),
+}).strict();  // Reject unknown fields
+
+// Custom error for auth/ownership (extends Error; errorCode matches HTTP status for easy handling)
+class CustomAuthError extends Error {
+  errorCode: number;
+  constructor(errorCode: number, message: string) {
+    super(message);
+    this.name = 'CustomAuthError';
+    this.errorCode = errorCode;
+  }
+}
+
+// Reusable ownership enforcer (uses req.client* from auth; minimizes DB calls by query where or single verify)
+const enforceClientOwnership = (req: any, ownerType: string, ownerId: string) => {
+  const clientType = req.clientType;
+  const clientId = req.clientId;
+  if (ownerType !== clientType || ownerId !== clientId) {
+    throw new CustomAuthError(403, 'Unauthorized: resource does not belong to client');
+  }
+};
+
 // List/search workflows
 export const listWorkflowsHandler = async (req: any, res: any) => {
   try {
-    const workflowRepo = AppDataSource.getRepository(Workflow);
-    const { search, resourceType, ownerType, ownerId, page = 1, limit = 10 } = req.query;
+    // Validate only allowed query fields (strict; 400 on extras/invalid)
+    const validated = listWorkflowsQuerySchema.parse(req.query);
 
-    const pageNum = Math.max(1, parseInt(page as string) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 10));  // Cap limit
+    const workflowRepo = AppDataSource.getRepository(Workflow);
+    const { search, resourceType, page = 1, limit = 10 } = validated;  // owner* overridden by client context
+
+    const pageNum = Math.max(1, page);
+    const limitNum = Math.min(100, limit);  // Cap limit
     const skip = (pageNum - 1) * limitNum;
 
-    // Build where conditions (simple LIKE for search)
-    const where: any = {};
+    // Build where (always enforce client ownership to minimize calls; support other filters)
+    const where: any = {
+      ownerType: req.clientType,
+      ownerId: req.clientId,
+    };
     if (resourceType) where.resourceType = resourceType;
-    if (ownerType) where.ownerType = ownerType;
-    if (ownerId) where.ownerId = ownerId;
     if (search) {
       where.name = Like(`%${search}%`);
     }
@@ -71,25 +109,29 @@ export const listWorkflowsHandler = async (req: any, res: any) => {
     });
   } catch (error: any) {
     logger.error(req, 'Failed to list workflows', { error: error.message });
-    res.status(500).json({ error: 'Internal server error' });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
 };
 
 // Create workflow
 export const createWorkflowHandler = async (req: any, res: any) => {
   try {
-    // Validate payload
+    // Validate payload (owner* removed; set from auth context)
     const validated = createWorkflowSchema.parse(req.body);
     const workflowRepo = AppDataSource.getRepository(Workflow);
 
-    // Pre-generate IDs
+    // Pre-generate IDs; set owner from req.client* (enforce via context)
     const workflowId = randomUUID();
     const workflow = workflowRepo.create({
       id: workflowId,
       name: validated.name,
       resourceType: validated.resourceType,
-      ownerType: validated.ownerType,
-      ownerId: validated.ownerId,
+      ownerType: req.clientType,
+      ownerId: req.clientId,
       enabled: validated.enabled,
       approvals: validated.approvals.map((app: any) => ({
         id: randomUUID(),
@@ -118,7 +160,12 @@ export const updateWorkflowHandler = async (req: any, res: any) => {
     const validated = updateWorkflowSchema.parse(req.body);
     const workflowRepo = AppDataSource.getRepository(Workflow);
 
-    const workflow = await workflowRepo.findOneBy({ id });
+    // Fetch with client ownership (single call; 404 hides existence from other clients)
+    const workflow = await workflowRepo.findOneBy({
+      id,
+      ownerType: req.clientType,
+      ownerId: req.clientId,
+    });
     if (!workflow) {
       return res.status(404).json({ error: 'Workflow not found' });
     }
@@ -158,8 +205,13 @@ export const createApprovalTaskHandler = async (req: any, res: any) => {
     const taskRepo = AppDataSource.getRepository(ApprovalTask);
     const workflowRepo = AppDataSource.getRepository(Workflow);
 
-    // Validate workflow exists and is enabled
-    const workflow = await workflowRepo.findOneBy({ id: validated.workflowId, enabled: true });
+    // Validate workflow exists, enabled, and belongs to client (single call)
+    const workflow = await workflowRepo.findOneBy({
+      id: validated.workflowId,
+      enabled: true,
+      ownerType: req.clientType,
+      ownerId: req.clientId,
+    });
     if (!workflow) {
       return res.status(400).json({ error: 'Workflow not found or not enabled' });
     }
@@ -175,10 +227,92 @@ export const createApprovalTaskHandler = async (req: any, res: any) => {
     });
 
     const saved = await taskRepo.save(task);
+
+    const savedWithRelations = await taskRepo.findOne({
+      where: { id: taskId },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
     logger.info(req, 'ApprovalTask created', { taskId: saved.id });
-    res.status(201).json(saved);
+    res.status(201).json(savedWithRelations || saved);
   } catch (error: any) {
     logger.error(req, 'Failed to create ApprovalTask', { error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+};
+
+export const getApprovalTaskHandler = async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+
+    const task = await taskRepo.findOne({
+      where: { id },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    if (!task) {
+      return res.status(404).json({ error: 'ApprovalTask not found' });
+    }
+
+    // Enforce ownership on linked workflow (single fetch + check)
+    enforceClientOwnership(req, task.workflow.ownerType, task.workflow.ownerId);
+
+    logger.info(req, 'ApprovalTask fetched', { taskId: id });
+    res.json(task);
+  } catch (error: any) {
+    logger.error(req, 'Failed to fetch ApprovalTask', { error: error.message });
+    if (error instanceof CustomAuthError) {
+      return res.status(error.errorCode).json({ error: 'Forbidden: access denied to resource' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const listApprovalTasksHandler = async (req: any, res: any) => {
+  try {
+    // Validate only allowed query fields (strict; 400 on extras/invalid)
+    const validated = listApprovalTasksQuerySchema.parse(req.query);
+
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+    const { search, status, workflowId, resourceId, page = 1, limit = 10 } = validated;
+
+    const pageNum = Math.max(1, page);
+    const limitNum = Math.min(100, limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Use QueryBuilder for ownership filter via workflow join (single DB call, enforces client access; supports other filters)
+    const query = taskRepo.createQueryBuilder('task')
+      .leftJoinAndSelect('task.workflow', 'workflow')
+      .leftJoinAndSelect('workflow.approvals', 'approvals')
+      .where('workflow.ownerType = :clientType AND workflow.ownerId = :clientId', {
+        clientType: req.clientType,
+        clientId: req.clientId,
+      });
+
+    // Add other filters
+    if (status) query.andWhere('task.status = :status', { status });
+    if (workflowId) query.andWhere('task.workflowId = :workflowId', { workflowId });
+    if (resourceId) query.andWhere('task.resourceId = :resourceId', { resourceId });
+    if (search) {
+      query.andWhere('task.resourceId LIKE :search', { search: `%${search}%` });
+    }
+
+    query.skip(skip).take(limitNum).orderBy('task.createdAt', 'DESC');
+
+    const [tasks, total] = await query.getManyAndCount();
+
+    logger.info(req, 'ApprovalTasks listed', { count: tasks.length, total, page: pageNum });
+    res.json({
+      data: tasks,
+      pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+    });
+  } catch (error: any) {
+    logger.error(req, 'Failed to list ApprovalTasks', { error: error.message });
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation failed', details: error.issues });
     } else {
