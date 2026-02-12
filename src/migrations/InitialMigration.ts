@@ -4,17 +4,15 @@ export class InitialMigration implements MigrationInterface {
   name = 'InitialMigration';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // Create User table
+    // Create Workflow table
     await queryRunner.createTable(
       new Table({
-        name: 'user',
+        name: 'workflow',
         columns: [
           new TableColumn({
             name: 'id',
-            type: 'integer',
+            type: 'uuid',
             isPrimary: true,
-            isGenerated: true,
-            generationStrategy: 'increment',
             isNullable: false,
           }),
           new TableColumn({
@@ -23,49 +21,86 @@ export class InitialMigration implements MigrationInterface {
             isNullable: false,
           }),
           new TableColumn({
-            name: 'email',
+            name: 'resourceType',
             type: 'varchar',
-            isUnique: true,
             isNullable: false,
+          }),
+          new TableColumn({
+            name: 'ownerType',
+            type: 'varchar',
+            isNullable: false,
+          }),
+          new TableColumn({
+            name: 'ownerId',
+            type: 'varchar',
+            isNullable: false,
+          }),
+          new TableColumn({
+            name: 'enabled',
+            type: 'boolean',
+            isNullable: false,
+            default: true,
+          }),
+          new TableColumn({
+            name: 'createdAt',
+            type: 'timestamp',
+            isNullable: false,
+            default: 'now()',
           }),
         ],
       }),
       true,
     );
 
-    // Create Post table
+    // Create WorkflowApprovals table
     await queryRunner.createTable(
       new Table({
-        name: 'post',
+        name: 'workflow_approvals',
         columns: [
           new TableColumn({
             name: 'id',
-            type: 'integer',
+            type: 'uuid',
             isPrimary: true,
-            isGenerated: true,
-            generationStrategy: 'increment',
             isNullable: false,
           }),
           new TableColumn({
-            name: 'title',
+            name: 'name',
             type: 'varchar',
             isNullable: false,
           }),
           new TableColumn({
-            name: 'content',
-            type: 'text',
+            name: 'workflowId',
+            type: 'uuid',
             isNullable: false,
           }),
           new TableColumn({
-            name: 'userId',
+            name: 'level',
             type: 'integer',
             isNullable: false,
+            default: 1,
+          }),
+          new TableColumn({
+            name: 'allowedRoles',
+            type: 'json',
+            isNullable: false,
+          }),
+          new TableColumn({
+            name: 'approvalCountsRequired',
+            type: 'integer',
+            isNullable: false,
+            default: 1,
+          }),
+          new TableColumn({
+            name: 'createdAt',
+            type: 'timestamp',
+            isNullable: false,
+            default: 'now()',
           }),
         ],
         foreignKeys: [
           new TableForeignKey({
-            columnNames: ['userId'],
-            referencedTableName: 'user',
+            columnNames: ['workflowId'],
+            referencedTableName: 'workflow',
             referencedColumnNames: ['id'],
             onDelete: 'CASCADE',
           }),
@@ -74,45 +109,49 @@ export class InitialMigration implements MigrationInterface {
       true,
     );
 
-    // Create Comment table
+    // Create ApprovalTask table
     await queryRunner.createTable(
       new Table({
-        name: 'comment',
+        name: 'approval_task',
         columns: [
           new TableColumn({
             name: 'id',
-            type: 'integer',
+            type: 'uuid',
             isPrimary: true,
-            isGenerated: true,
-            generationStrategy: 'increment',
             isNullable: false,
           }),
           new TableColumn({
-            name: 'content',
-            type: 'text',
+            name: 'workflowId',
+            type: 'uuid',
             isNullable: false,
           }),
           new TableColumn({
-            name: 'postId',
+            name: 'resourceId',
+            type: 'varchar',
+            isNullable: false,
+          }),
+          new TableColumn({
+            name: 'status',
+            type: 'varchar',
+            isNullable: false,
+            default: 'Pending',
+          }),
+          new TableColumn({
+            name: 'nextReviewLevel',
             type: 'integer',
-            isNullable: false,
+            isNullable: true,
           }),
           new TableColumn({
-            name: 'userId',
-            type: 'integer',
+            name: 'createdAt',
+            type: 'timestamp',
             isNullable: false,
+            default: 'now()',
           }),
         ],
         foreignKeys: [
           new TableForeignKey({
-            columnNames: ['postId'],
-            referencedTableName: 'post',
-            referencedColumnNames: ['id'],
-            onDelete: 'CASCADE',
-          }),
-          new TableForeignKey({
-            columnNames: ['userId'],
-            referencedTableName: 'user',
+            columnNames: ['workflowId'],
+            referencedTableName: 'workflow',
             referencedColumnNames: ['id'],
             onDelete: 'CASCADE',
           }),
@@ -123,8 +162,8 @@ export class InitialMigration implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.dropTable('comment');
-    await queryRunner.dropTable('post');
-    await queryRunner.dropTable('user');
+    await queryRunner.dropTable('approval_task');
+    await queryRunner.dropTable('workflow_approvals');
+    await queryRunner.dropTable('workflow');
   }
 }

@@ -1,7 +1,7 @@
 import { AppDataSource } from '../../src/database';
-import { User } from '../../src/entities/User';
-import { Post } from '../../src/entities/Post';
-import { Comment } from '../../src/entities/Comment';
+import { Workflow } from '../../src/entities/Workflow';
+import { WorkflowApprovals } from '../../src/entities/WorkflowApprovals';
+import * as crypto from 'crypto';
 
 async function testDatabase() {
   try {
@@ -10,46 +10,45 @@ async function testDatabase() {
       await AppDataSource.initialize();
     }
 
-    const userRepo = AppDataSource.getRepository(User);
-    const postRepo = AppDataSource.getRepository(Post);
-    const commentRepo = AppDataSource.getRepository(Comment);
+    const workflowRepo = AppDataSource.getRepository(Workflow);
+    const approvalsRepo = AppDataSource.getRepository(WorkflowApprovals);
 
     // Clear existing data for clean test
-    await commentRepo.clear();
-    await postRepo.clear();
-    await userRepo.clear();
+    await approvalsRepo.clear();
+    await workflowRepo.clear();
 
-    console.log('Testing inserts for User, Post, Comment...');
+    console.log('Testing inserts for Workflow, WorkflowApprovals...');
 
-    // Insert User
-    const user = userRepo.create({
-      name: 'Demo User',
-      email: 'demo@example.com',
+    // Insert Workflow (id pre-generated as UUID)
+    const workflowId = crypto.randomUUID();
+    const workflow = workflowRepo.create({
+      id: workflowId,
+      name: 'Demo Workflow',
+      resourceType: 'project',
+      ownerType: 'user',
+      ownerId: 'user-456',
+      enabled: true,
     });
-    await userRepo.save(user);
-    console.log('Inserted User:', user);
+    await workflowRepo.save(workflow);
+    console.log('Inserted Workflow:', workflow);
 
-    // Insert Post
-    const post = postRepo.create({
-      title: 'Demo Post',
-      content: 'This is a sample post content for the demo.',
-      user,
+    // Insert WorkflowApprovals
+    const approval = approvalsRepo.create({
+      id: crypto.randomUUID(),
+      name: 'Demo Approval Level 1',
+      workflowId,
+      level: 1,
+      allowedRoles: ['admin', 'approver'],
+      approvalCountsRequired: 1,
     });
-    await postRepo.save(post);
-    console.log('Inserted Post:', post);
+    await approvalsRepo.save(approval);
+    console.log('Inserted WorkflowApprovals:', approval);
 
-    // Insert Comment
-    const comment = commentRepo.create({
-      content: 'Great post! Nice demo.',
-      post,
-      user,
-    });
-    await commentRepo.save(comment);
-    console.log('Inserted Comment:', comment);
-
-    // Read back with relations
-    const users = await userRepo.find({ relations: ['posts', 'posts.comments'] });
-    console.log('Read Users with relations:', JSON.stringify(users, null, 2));
+    // Read back
+    const workflows = await workflowRepo.find();
+    const approvals = await approvalsRepo.find();
+    console.log('Read Workflows:', JSON.stringify(workflows, null, 2));
+    console.log('Read WorkflowApprovals:', JSON.stringify(approvals, null, 2));
 
     console.log('All tests passed successfully!');
   } catch (error) {

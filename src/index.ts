@@ -3,6 +3,14 @@ import { AppDataSource } from './database';
 import { createRouter, type Route } from './router';
 import { logger } from './logger';
 
+// Import workflow handlers from dedicated controllers (keeps index.ts clean)
+import {
+  listWorkflowsHandler,
+  createWorkflowHandler,
+  updateWorkflowHandler,
+  createApprovalTaskHandler,
+} from './controllers/workflows';
+
 // Sample route handlers (demo; use entities in real; logger uses req.requestId)
 const healthHandler = (req: any, res: any) => {
   logger.info(req, 'Health check called');
@@ -27,6 +35,32 @@ const routes: Route[] = [
     method: 'GET',
     endpoint: '/api/demo',
     handler: demoHandler,
+  },
+  // Workflow routes for approvals service (controllers in src/controllers/workflows.ts)
+  {
+    route_name: 'list_workflows',
+    method: 'GET',
+    endpoint: '/workflows',
+    handler: listWorkflowsHandler,
+  },
+  {
+    route_name: 'create_workflow',
+    method: 'POST',
+    endpoint: '/workflows',
+    handler: createWorkflowHandler,
+  },
+  {
+    route_name: 'update_workflow',
+    method: 'PATCH',
+    endpoint: '/workflows/:id',
+    handler: updateWorkflowHandler,
+  },
+  // ApprovalTask create API
+  {
+    route_name: 'create_approval_task',
+    method: 'POST',
+    endpoint: '/approval-tasks',
+    handler: createApprovalTaskHandler,
   },
 ];
 

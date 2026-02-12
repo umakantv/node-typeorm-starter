@@ -3,9 +3,9 @@ import { DataSource } from 'typeorm';
 import { config, isProd } from '../config/config';
 
 // Import entities explicitly to ensure metadata is registered (fixes runtime issues like in test scripts)
-import { User } from '../entities/User';
-import { Post } from '../entities/Post';
-import { Comment } from '../entities/Comment';
+import { Workflow } from '../entities/Workflow';
+import { WorkflowApprovals } from '../entities/WorkflowApprovals';
+import { ApprovalTask } from '../entities/ApprovalTask';
 
 // Determine DB_TYPE: in prod always 'postgres'; else from config
 const getDbType = (): 'postgres' | 'sqlite' | 'sqlite:memory' => {
@@ -28,7 +28,7 @@ if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
     synchronize: true, // Auto-create tables (dev only; disable in prod)
     logging: config.LOG_LEVEL === 'debug',
     // Entities as classes (ensures metadata); globs for migrations/subscribers only
-    entities: [User, Post, Comment],
+    entities: [Workflow, WorkflowApprovals, ApprovalTask],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };
@@ -44,7 +44,7 @@ if (dbType === 'sqlite' || dbType === 'sqlite:memory') {
     synchronize: !isProd(), // Only sync in non-prod
     logging: config.LOG_LEVEL === 'debug',
     // Entities as classes (ensures metadata); globs for migrations/subscribers only
-    entities: [User, Post, Comment],
+    entities: [Workflow, WorkflowApprovals, ApprovalTask],
     migrations: [`${__dirname}/../../migrations/**/*{.ts,.js}`],
     subscribers: [`${__dirname}/../../subscribers/**/*{.ts,.js}`],
   };

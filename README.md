@@ -31,13 +31,13 @@ Use TypeORM `AppDataSource` for DB ops (Postgres in prod; SQLite options in dev/
 
 ```ts
 import { AppDataSource } from './database';
-import { User } from './entities/User';  // Your entities here
+import { Workflow } from './entities/Workflow';  // Your entities here
 
 await AppDataSource.initialize();
 
 // Example query
-const userRepo = AppDataSource.getRepository(User);
-const users = await userRepo.find({ relations: ['posts'] });
+const workflowRepo = AppDataSource.getRepository(Workflow);
+const workflows = await workflowRepo.find();
 ```
 
 - Add entities to `src/entities/` (decorators).
