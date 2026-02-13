@@ -1,14 +1,50 @@
-# zed-base
+# Approval Workflows Microservice
 
-Opinionated boilerplate for lightweight Node.js TypeScript microservices. Fork this to build your service – it provides reusable components for config, database, routing, logging, and HTTP clients.
+This microservice manages role-based, multi-level approval workflows. Each workflow defines approval levels with allowed roles and required counts. ApprovalTasks are created for resources and progress through levels via approve/reject/discard actions. All endpoints are protected by service auth headers (`x-account-type: service`, `x-account-id`).
+
+**Key features:**
+- Workflows (create/update/list) with sequential approval levels.
+- ApprovalTasks (create/list/get/approve/reject/discard) with status tracking, history, and computed `nextReviewRoles`.
+- Role-based verification for actions; action history in JSON (includes reviewer, actionType, levels, statuses, optional comment, timestamp).
+- Bulk discard support.
+- TypeORM DB (Postgres prod, SQLite dev); auth/ownership enforced.
+
+## API Endpoints
+
+All require headers:
+- `x-account-type: service`
+- `x-account-id: <client-id>`
+- Optional `x-request-id` for tracing.
+
+### Workflows
+- `GET /workflows` - List (with query filters, pagination).
+- `POST /workflows` - Create (with approvals array; levels must be consecutive).
+- `PATCH /workflows/:id` - Update (name/enabled).
+
+### Approval Tasks
+- `POST /approval-tasks` - Create for a workflow/resource.
+- `POST /approval-tasks/bulk` - Bulk create (body: `{workflowId, resourceIds: []}`; validates workflow once, batch DB save + relations load; returns array of tasks with `nextReviewRoles`).
+- `GET /approval-tasks` - List (filters: status, workflowId, etc.; pagination).
+- `GET /approval-tasks/:id` - Get details (with workflow/approvals/history).
+- `POST /approval-tasks/:id/approve` - Approve current level (body: `{reviewerId, reviewerRoles, comment?}`; advances level or completes; 403 on role mismatch).
+- `POST /approval-tasks/:id/reject` - Reject (body: `{reviewerId, reviewerRoles, comment}`; level 1 rejects fully, else decrements; history includes comment).
+- `POST /approval-tasks/discard` - Bulk discard (body: `{taskIds: [], reviewerId, reviewerRoles, comment?}`; sets Discarded, records history per task; returns successes/errors).
+
+Responses include computed `nextReviewRoles` (from workflow config) and full `actionHistory`.
+
+## Entities & Logic
+- **Workflow**: Defines enabled approval levels (allowedRoles, approvalCountsRequired).
+- **ApprovalTask**: Tracks status (Pending/InProgress/Completed/Rejected/Discarded), nextReviewLevel, actionHistory JSON.
+- Actions verify roles at current level; history logs all details.
+- See `src/entities/*` and `src/controllers/workflows.ts` for impl.
 
 ## Getting Started
 
-1. Copy `.env.example` to `.env` and customize values (e.g. `DB_TYPE`, DB creds, `LOG_LEVEL`).
-2. Run `npm run build` to compile TypeScript.
-3. Run `npm start` to launch the app (uses `src/index.ts` bootstrap).
+1. Copy `.env.example` to `.env` (DB creds, etc.).
+2. `npm run build` (TypeScript compile).
+3. `npm start` (bootstraps DB + server on PORT).
 
-Extend by adding your entities, routes, business logic. Use `npm run build` for production builds.
+See `src/index.ts` for routes, `src/controllers/workflows.ts` for handlers. Extend with reject strategies in workflow config later.
 
 ## Config
 

@@ -6,6 +6,7 @@ export enum ApprovalStatus {
   InProgress = 'InProgress',
   Completed = 'Completed',
   Rejected = 'Rejected',
+  Discarded = 'Discarded',
 }
 
 @Entity()
@@ -27,6 +28,9 @@ export class ApprovalTask {
 
   @Column({ type: 'integer', nullable: true })
   nextReviewLevel: number | null;
+
+  @Column({ type: 'json', nullable: true, default: '[]' })
+  actionHistory: any[];
 
   @CreateDateColumn()
   createdAt: Date;

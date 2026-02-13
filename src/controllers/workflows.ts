@@ -2,8 +2,9 @@ import { Request, Response } from 'express';
 import { AppDataSource } from '../database';
 import { Workflow } from '../entities/Workflow';
 import { ApprovalTask, ApprovalStatus } from '../entities/ApprovalTask';
+import { WorkflowApprovals } from '../entities/WorkflowApprovals';
 import { z } from 'zod';
-import { Like } from 'typeorm';
+import { Like, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { logger } from '../logger';
 
@@ -69,6 +70,13 @@ const enforceClientOwnership = (req: any, ownerType: string, ownerId: string) =>
   if (ownerType !== clientType || ownerId !== clientId) {
     throw new CustomAuthError(403, 'Unauthorized: resource does not belong to client');
   }
+};
+
+// Helper: compute nextReviewRoles from workflow.approvals (for response only; not persisted)
+const getNextReviewRoles = (task: any): string[] => {
+  if (!task.nextReviewLevel || !task.workflow?.approvals) return [];
+  const match = task.workflow.approvals.find((a: any) => a.level === task.nextReviewLevel);
+  return match?.allowedRoles || [];
 };
 
 // List/search workflows
@@ -192,10 +200,37 @@ export const updateWorkflowHandler = async (req: any, res: any) => {
   }
 };
 
-// Create ApprovalTask (simple create with pre-gen ID; status/nextReviewLevel default internally to Pending/1 - controlled by future approve/reject logic)
 const createApprovalTaskSchema = z.object({
   workflowId: z.string().min(1),
   resourceId: z.string().min(1),
+});
+
+// Schema for approve endpoint (comment optional)
+const approveTaskSchema = z.object({
+  reviewerId: z.string().min(1),
+  reviewerRoles: z.array(z.string().min(1)).min(1),
+  comment: z.string().min(1).optional(),
+});
+
+// Schema for reject endpoint (comment mandatory)
+const rejectTaskSchema = z.object({
+  reviewerId: z.string().min(1),
+  reviewerRoles: z.array(z.string().min(1)).min(1),
+  comment: z.string().min(1),
+});
+
+// Schema for bulk discard (taskIds required; comment optional like approve)
+const discardTasksSchema = z.object({
+  taskIds: z.array(z.string().min(1)).min(1),
+  reviewerId: z.string().min(1),
+  reviewerRoles: z.array(z.string().min(1)).min(1),
+  comment: z.string().min(1).optional(),
+});
+
+// Schema for bulk create approval tasks (workflow once, multiple resources)
+const bulkCreateTasksSchema = z.object({
+  workflowId: z.string().min(1),
+  resourceIds: z.array(z.string().min(1)).min(1),
 });
 
 export const createApprovalTaskHandler = async (req: any, res: any) => {
@@ -224,6 +259,7 @@ export const createApprovalTaskHandler = async (req: any, res: any) => {
       resourceId: validated.resourceId,
       status: ApprovalStatus.Pending,
       nextReviewLevel: 1,
+      actionHistory: [],
     });
 
     const saved = await taskRepo.save(task);
@@ -234,7 +270,12 @@ export const createApprovalTaskHandler = async (req: any, res: any) => {
     });
 
     logger.info(req, 'ApprovalTask created', { taskId: saved.id });
-    res.status(201).json(savedWithRelations || saved);
+    // Add computed nextReviewRoles to response (from workflow.approvals)
+    const responseData = savedWithRelations || saved;
+    res.status(201).json({
+      ...responseData,
+      nextReviewRoles: getNextReviewRoles(responseData),
+    });
   } catch (error: any) {
     logger.error(req, 'Failed to create ApprovalTask', { error: error.message });
     if (error instanceof z.ZodError) {
@@ -263,7 +304,11 @@ export const getApprovalTaskHandler = async (req: any, res: any) => {
     enforceClientOwnership(req, task.workflow.ownerType, task.workflow.ownerId);
 
     logger.info(req, 'ApprovalTask fetched', { taskId: id });
-    res.json(task);
+    // Add computed nextReviewRoles to response
+    res.json({
+      ...task,
+      nextReviewRoles: getNextReviewRoles(task),
+    });
   } catch (error: any) {
     logger.error(req, 'Failed to fetch ApprovalTask', { error: error.message });
     if (error instanceof CustomAuthError) {
@@ -307,12 +352,407 @@ export const listApprovalTasksHandler = async (req: any, res: any) => {
     const [tasks, total] = await query.getManyAndCount();
 
     logger.info(req, 'ApprovalTasks listed', { count: tasks.length, total, page: pageNum });
+    // Add computed nextReviewRoles to each task in response
+    const tasksWithRoles = tasks.map(task => ({
+      ...task,
+      nextReviewRoles: getNextReviewRoles(task),
+    }));
     res.json({
-      data: tasks,
+      data: tasksWithRoles,
       pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
     });
   } catch (error: any) {
     logger.error(req, 'Failed to list ApprovalTasks', { error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+};
+
+// Approve handler
+export const approveApprovalTaskHandler = async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const validated = approveTaskSchema.parse(req.body);
+    const { reviewerId, reviewerRoles, comment } = validated;
+
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+    const task = await taskRepo.findOne({
+      where: { id },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    if (!task) {
+      return res.status(404).json({ error: 'ApprovalTask not found' });
+    }
+
+    // Enforce ownership (caller must own the workflow)
+    enforceClientOwnership(req, task.workflow.ownerType, task.workflow.ownerId);
+
+    // Check task state
+    if (task.status === ApprovalStatus.Completed || task.status === ApprovalStatus.Rejected) {
+      return res.status(400).json({ error: 'Task already completed or rejected' });
+    }
+    if (!task.nextReviewLevel) {
+      return res.status(400).json({ error: 'No pending review level' });
+    }
+
+    // Find current level's approval config
+    const currentApproval: WorkflowApprovals | undefined = task.workflow.approvals.find(
+      (a: any) => a.level === task.nextReviewLevel
+    );
+    if (!currentApproval) {
+      return res.status(400).json({ error: 'Approval level config not found' });
+    }
+
+    // Verify role match: at least one reviewerRole in allowedRoles
+    const roleMatch = reviewerRoles.some((role: string) =>
+      currentApproval.allowedRoles.includes(role)
+    );
+    if (!roleMatch) {
+      return res.status(403).json({
+        error: `Insufficient permissions. Current level ${task.nextReviewLevel} requires one of: ${currentApproval.allowedRoles.join(', ')}`,
+      });
+    }
+
+    // On success: advance level or complete (simple logic; counts ignored for initial impl)
+    const currentLevel = task.nextReviewLevel;
+    const currentStatus = task.status;
+    const maxLevel = Math.max(...task.workflow.approvals.map((a: any) => a.level));
+    let nextLevel: number | null;
+    let nextStatus: ApprovalStatus;
+    if (currentLevel >= maxLevel) {
+      nextStatus = ApprovalStatus.Completed;
+      nextLevel = null;
+    } else {
+      nextStatus = ApprovalStatus.InProgress;
+      nextLevel = currentLevel + 1;
+    }
+    task.status = nextStatus;
+    task.nextReviewLevel = nextLevel;
+
+    // Record history entry (per spec; push before save)
+    const historyEntry = {
+      reviewerId,
+      reviewerRoles,
+      actionType: 'approve',
+      comment,  // optional (undefined if not provided)
+      currentLevel,
+      nextLevel,
+      currentStatus,
+      nextStatus,
+      timestamp: new Date().toISOString(),
+    };
+    if (!task.actionHistory) {
+      task.actionHistory = [];
+    }
+    task.actionHistory.push(historyEntry);
+
+    // Save update
+    await taskRepo.save(task);
+
+    // Reload with relations for response
+    const updatedTask = await taskRepo.findOne({
+      where: { id },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    logger.info(req, 'ApprovalTask approved', { taskId: id, reviewerId, level: currentLevel });
+    // Add computed nextReviewRoles to response
+    const responseData = updatedTask || task;
+    res.json({
+      ...responseData,
+      nextReviewRoles: getNextReviewRoles(responseData),
+    });
+  } catch (error: any) {
+    logger.error(req, 'Failed to approve ApprovalTask', { error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else if (error instanceof CustomAuthError) {
+      return res.status(error.errorCode).json({ error: 'Forbidden: access denied to resource' });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+};
+
+// Reject handler
+export const rejectApprovalTaskHandler = async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const validated = rejectTaskSchema.parse(req.body);
+    const { reviewerId, reviewerRoles, comment } = validated;
+
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+    const task = await taskRepo.findOne({
+      where: { id },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    if (!task) {
+      return res.status(404).json({ error: 'ApprovalTask not found' });
+    }
+
+    // Enforce ownership
+    enforceClientOwnership(req, task.workflow.ownerType, task.workflow.ownerId);
+
+    // Check task state
+    if (task.status === ApprovalStatus.Completed || task.status === ApprovalStatus.Rejected) {
+      return res.status(400).json({ error: 'Task already completed or rejected' });
+    }
+    if (!task.nextReviewLevel) {
+      return res.status(400).json({ error: 'No pending review level' });
+    }
+
+    // Find current level's approval config (reuse role verify logic)
+    const currentApproval: WorkflowApprovals | undefined = task.workflow.approvals.find(
+      (a: any) => a.level === task.nextReviewLevel
+    );
+    if (!currentApproval) {
+      return res.status(400).json({ error: 'Approval level config not found' });
+    }
+
+    // Verify role match
+    const roleMatch = reviewerRoles.some((role: string) =>
+      currentApproval.allowedRoles.includes(role)
+    );
+    if (!roleMatch) {
+      return res.status(403).json({
+        error: `Insufficient permissions. Current level ${task.nextReviewLevel} requires one of: ${currentApproval.allowedRoles.join(', ')}`,
+      });
+    }
+
+    // Apply reject strategy: level 1 -> Rejected; else decrement level
+    const currentLevel = task.nextReviewLevel;
+    const currentStatus = task.status;
+    let nextLevel: number | null;
+    let nextStatus: ApprovalStatus;
+    if (currentLevel === 1) {
+      nextStatus = ApprovalStatus.Rejected;
+      nextLevel = null;
+    } else {
+      nextStatus = ApprovalStatus.InProgress;
+      nextLevel = currentLevel - 1;
+    }
+    task.status = nextStatus;
+    task.nextReviewLevel = nextLevel;
+
+    // Record history (include comment)
+    const historyEntry = {
+      reviewerId,
+      reviewerRoles,
+      actionType: 'reject',
+      comment,
+      currentLevel,
+      nextLevel,
+      currentStatus,
+      nextStatus,
+      timestamp: new Date().toISOString(),
+    };
+    if (!task.actionHistory) {
+      task.actionHistory = [];
+    }
+    task.actionHistory.push(historyEntry);
+
+    // Save
+    await taskRepo.save(task);
+
+    // Reload + add nextReviewRoles
+    const updatedTask = await taskRepo.findOne({
+      where: { id },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    logger.info(req, 'ApprovalTask rejected', { taskId: id, reviewerId, level: currentLevel });
+    const responseData = updatedTask || task;
+    res.json({
+      ...responseData,
+      nextReviewRoles: getNextReviewRoles(responseData),
+    });
+  } catch (error: any) {
+    logger.error(req, 'Failed to reject ApprovalTask', { error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else if (error instanceof CustomAuthError) {
+      return res.status(error.errorCode).json({ error: 'Forbidden: access denied to resource' });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+};
+
+// Discard handler (bulk)
+export const discardApprovalTasksHandler = async (req: any, res: any) => {
+  try {
+    const validated = discardTasksSchema.parse(req.body);
+    const { taskIds, reviewerId, reviewerRoles, comment } = validated;
+
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+
+    // Precise types (no any)
+    type TaskWithRoles = ApprovalTask & { nextReviewRoles: string[] };
+    interface DiscardError { taskId: string; error: string; }
+    const results = { discarded: [] as TaskWithRoles[], errors: [] as DiscardError[] };
+
+    // Single DB call: fetch ALL tasks + relations upfront (minimizes calls)
+    const tasks = await taskRepo.find({
+      where: { id: In(taskIds) },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+    const taskMap = new Map(tasks.map(t => [t.id, t]));
+
+    // Process each (in-memory; collect updates)
+    const updatedTasks: ApprovalTask[] = [];
+    for (const id of taskIds) {
+      try {
+        const task = taskMap.get(id);
+        if (!task) {
+          results.errors.push({ taskId: id, error: 'ApprovalTask not found' });
+          continue;
+        }
+
+        // Enforce ownership per task
+        enforceClientOwnership(req, task.workflow.ownerType, task.workflow.ownerId);
+
+        // Skip if already terminal
+        if ([ApprovalStatus.Completed, ApprovalStatus.Rejected, ApprovalStatus.Discarded].includes(task.status)) {
+          results.errors.push({ taskId: id, error: 'Task already in terminal state' });
+          continue;
+        }
+
+        // Optional role check (for consistency; skip if no current level)
+        // Type matches find() return; if-guard narrows away undefined (use ! for strict TS)
+        let currentApproval: WorkflowApprovals | undefined;
+        if (task.nextReviewLevel) {
+          currentApproval = task.workflow.approvals.find((a: any) => a.level === task.nextReviewLevel);
+          if (currentApproval) {
+            const roleMatch = reviewerRoles.some((role: string) => currentApproval!.allowedRoles.includes(role));
+            if (!roleMatch) {
+              results.errors.push({ taskId: id, error: `Insufficient permissions. Current level requires one of: ${currentApproval!.allowedRoles.join(', ')}` });
+              continue;
+            }
+          }
+        }
+
+        // Discard: set Discarded, null level
+        const currentLevel = task.nextReviewLevel || 0;
+        const currentStatus = task.status;
+        const nextLevel = null;
+        const nextStatus = ApprovalStatus.Discarded;
+        task.status = nextStatus;
+        task.nextReviewLevel = nextLevel;
+
+        // Record history per task
+        const historyEntry = {
+          reviewerId,
+          reviewerRoles,
+          actionType: 'discard',
+          comment,  // optional
+          currentLevel,
+          nextLevel,
+          currentStatus,
+          nextStatus,
+          timestamp: new Date().toISOString(),
+        };
+        if (!task.actionHistory) task.actionHistory = [];
+        task.actionHistory.push(historyEntry);
+
+        updatedTasks.push(task);  // Collect for batch/parallel update
+      } catch (taskError: any) {
+        results.errors.push({ taskId: id, error: taskError.message || 'Discard failed' });
+      }
+    }
+
+    // Parallel updates (Promise.all for concurrent saves; same # calls but min latency)
+    await Promise.all(updatedTasks.map(task => taskRepo.save(task)));
+
+    // Batch reload successes (one query for relations/history in response)
+    if (updatedTasks.length > 0) {
+      const successIds = updatedTasks.map(t => t.id);
+      const reloaded = await taskRepo.find({
+        where: { id: In(successIds) },
+        relations: ['workflow', 'workflow.approvals'],
+      });
+      const reloadedMap = new Map(reloaded.map(t => [t.id, t]));
+      for (const task of updatedTasks) {
+        const responseData = reloadedMap.get(task.id) || task;
+        results.discarded.push({
+          ...responseData,
+          nextReviewRoles: getNextReviewRoles(responseData),
+        });
+      }
+    }
+
+    logger.info(req, 'Bulk discard completed', { taskIds, successCount: results.discarded.length, errorCount: results.errors.length });
+    res.json(results);
+  } catch (error: any) {
+    logger.error(req, 'Failed to discard ApprovalTasks', { error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: error.issues });
+    } else if (error instanceof CustomAuthError) {
+      return res.status(error.errorCode).json({ error: 'Forbidden: access denied to resource' });
+    } else {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+};
+
+// Bulk create handler: creates multiple tasks for one workflow + resourceIds array (reuses single-create logic)
+export const bulkCreateApprovalTasksHandler = async (req: any, res: any) => {
+  try {
+    const validated = bulkCreateTasksSchema.parse(req.body);
+    const { workflowId, resourceIds } = validated;
+
+    const taskRepo = AppDataSource.getRepository(ApprovalTask);
+    const workflowRepo = AppDataSource.getRepository(Workflow);
+
+    // Validate workflow once (enabled + ownership)
+    const workflow = await workflowRepo.findOneBy({
+      id: workflowId,
+      enabled: true,
+      ownerType: req.clientType,
+      ownerId: req.clientId,
+    });
+    if (!workflow) {
+      return res.status(400).json({ error: 'Workflow not found or not enabled' });
+    }
+
+    // Batch create: pre-gen IDs, one save() call, one find with relations
+    const tasksToSave = [];
+    const taskIds = [];
+    for (const resourceId of resourceIds) {
+      const taskId = randomUUID();
+      taskIds.push(taskId);
+      tasksToSave.push(taskRepo.create({
+        id: taskId,
+        workflowId,
+        resourceId,
+        status: ApprovalStatus.Pending,
+        nextReviewLevel: 1,
+        actionHistory: [],
+      }));
+    }
+
+    await taskRepo.save(tasksToSave);  // Single DB call for all
+
+    // Reload all with relations (one query)
+    const savedTasks = await taskRepo.find({
+      where: { id: In(taskIds) },
+      relations: ['workflow', 'workflow.approvals'],
+    });
+
+    // Map with computed nextReviewRoles
+    const createdTasks = savedTasks.map(task => ({
+      ...task,
+      nextReviewRoles: getNextReviewRoles(task),
+    }));
+
+    logger.info(req, 'Bulk ApprovalTasks created', { workflowId, count: createdTasks.length });
+    res.status(201).json({ data: createdTasks });
+  } catch (error: any) {
+    logger.error(req, 'Failed to bulk create ApprovalTasks', { error: error.message });
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation failed', details: error.issues });
     } else {

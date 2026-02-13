@@ -3,7 +3,7 @@ import { AppDataSource } from './database';
 import { createRouter, type Route } from './router';
 import { logger } from './logger';
 
-// Import workflow handlers from dedicated controllers (keeps index.ts clean)
+// Import workflow handlers from dedicated controllers
 import {
   listWorkflowsHandler,
   createWorkflowHandler,
@@ -11,6 +11,10 @@ import {
   createApprovalTaskHandler,
   listApprovalTasksHandler,
   getApprovalTaskHandler,
+  approveApprovalTaskHandler,
+  rejectApprovalTaskHandler,
+  discardApprovalTasksHandler,
+  bulkCreateApprovalTasksHandler,
 } from './controllers/workflows';
 
 // Sample route handlers (demo; use entities in real; logger uses req.requestId)
@@ -57,7 +61,7 @@ const routes: Route[] = [
     endpoint: '/workflows/:id',
     handler: updateWorkflowHandler,
   },
-  // ApprovalTask create API
+  // ApprovalTask routes
   {
     route_name: 'create_approval_task',
     method: 'POST',
@@ -75,6 +79,30 @@ const routes: Route[] = [
     method: 'GET',
     endpoint: '/approval-tasks/:id',
     handler: getApprovalTaskHandler,
+  },
+  {
+    route_name: 'approve_approval_task',
+    method: 'POST',
+    endpoint: '/approval-tasks/:id/approve',
+    handler: approveApprovalTaskHandler,
+  },
+  {
+    route_name: 'reject_approval_task',
+    method: 'POST',
+    endpoint: '/approval-tasks/:id/reject',
+    handler: rejectApprovalTaskHandler,
+  },
+  {
+    route_name: 'discard_approval_tasks',
+    method: 'POST',
+    endpoint: '/approval-tasks/discard',
+    handler: discardApprovalTasksHandler,
+  },
+  {
+    route_name: 'bulk_create_approval_tasks',
+    method: 'POST',
+    endpoint: '/approval-tasks/bulk',
+    handler: bulkCreateApprovalTasksHandler,
   },
 ];
 
